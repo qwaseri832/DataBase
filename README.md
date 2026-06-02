@@ -17,11 +17,16 @@ In-Memory Key-Value Storage
 
 
 
+
+
 Запуск сервера:
 go run cmd/server/main.go
 
 Запуск CLI:
 go run cmd/cli/main.go
+
+
+
 
 
 
@@ -35,6 +40,8 @@ go run cmd/cli/main.go
 - Replication — Master-Slave синхронизация через TCP
 
 Клиент → TCP Server → Parser → Storage → Engine/WAL/Replication → Ответ
+
+
 
 
 
