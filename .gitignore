@@ -1,0 +1,7 @@
+# Binaries 
+/bin/ 
+*.exe 
+*.log 
+/data/ 
+.idea/ 
+.vscode/ 
