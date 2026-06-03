@@ -14,26 +14,7 @@
 - 🔌 **Простой TCP-протокол** — легко интегрируется с любыми языками
 - ⚡ **Потокобезопасность** — все операции безопасны для конкурентного доступа
 
-## 🏗️ Архитектура
-┌─────────┐ ┌─────────────┐ ┌─────────────────────────┐
-│ Клиент │────▶│ TCP сервер │────▶│ Database │
-└─────────┘ └─────────────┘ │ ┌─────────┬─────────┐ │
-│ │ Парсер │ Storage │ │
-│ └─────────┴─────────┘ │
-│ │ │
-│ ┌────┴────┐ │
-│ ↓ ↓ │
-│ Engine WAL │
-│(in-memory) (диск) │
-└─────────────────────────┘
-│
-┌─────────┴─────────┐
-↓ ↓
-┌──────────┐ ┌──────────┐
-│ Master │◀─────▶│ Slave │
-└──────────┘ └──────────┘
 
-text
 
 ## 📋 Команды
 
@@ -43,60 +24,9 @@ text
 | GET | `GET <key>` | `[ok] <value>` или `[not found]` |
 | DEL | `DEL <key>` | `[ok]` |
 
-## 🚀 Быстрый старт
 
-### Установка
-
-```bash
-git clone https://github.com/yourusername/spider.git
-cd spider
-go build -o spider-server ./cmd/server
-go build -o spider-client ./cmd/client
-Запуск сервера (Master)
-bash
-./spider-server --config config.yml
-Пример конфигурации config.yml:
-
-yaml
-engine:
-  partitions: 8
-
-wal:
-  batch_size: 100
-  batch_timeout: 10ms
-  segment_max_size: 10MB
-  directory: ./data/wal
-
-replication:
-  role: master
-  master_addr: "127.0.0.1:4400"
-  sync_interval: 1s
-
-server:
-  addr: "127.0.0.1:4200"
-  max_clients: 100
-  read_buffer: 4KB
-  idle_timeout: 5m
-
-logging:
-  level: info
-  file: spider.log
-Запуск Slave
-yaml
-replication:
-  role: slave
-  master_addr: "127.0.0.1:4400"
-Клиент
-bash
-./spider-client -addr 127.0.0.1:4200
-[spider] > SET name Spider
-[ok]
-[spider] > GET name
-[ok] Spider
-[spider] > DEL name
-[ok]
 📁 Структура проекта
-text
+
 spider/
 ├── cmd/
 │   ├── server/          # Точка входа сервера
@@ -167,5 +97,5 @@ MIT © 2024
 
 ⭐ Если проект полезен, поставьте звезду на GitHub!
 
-text
+
 
