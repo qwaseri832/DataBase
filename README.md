@@ -60,16 +60,6 @@ spider/
 │   └── tools/           # Вспомогательные функции
 ├── config.yml           # Пример конфигурации
 └── go.mod
-🔧 Конфигурация
-Параметр	Описание	По умолчанию
-engine.partitions	Количество партиций для шардирования	1
-wal.batch_size	Размер батча для WAL	100
-wal.batch_timeout	Таймаут накопления батча	10ms
-wal.segment_max_size	Максимальный размер сегмента	10MB
-replication.role	master или slave	-
-replication.master_addr	Адрес мастера (для слейва)	-
-server.max_clients	Максимум одновременных клиентов	без ограничений
-server.idle_timeout	Таймаут бездействия соединения	5m
 🧪 Тестирование
 bash
 go test ./...
@@ -79,19 +69,6 @@ go test ./...
 Конкурентность — каждая партиция имеет свой RWMutex
 
 Пакетная запись — WAL накапливает операции и пишет батчами
-
-🛠️ Планы развития
-Персистентное хранилище (LSM-дерево)
-
-Аутентификация и TLS
-
-Автоматический failover
-
-Replication consensus (Raft)
-
-Prometheus метрики
-
-Docker образ
 
 🤝 Вклад в проект
 Приветствуются issues и pull requests!
