@@ -17,6 +17,7 @@ server:
   addr: "127.0.0.1:4200"
   max_clients: 100
   read_buffer: "4KB"
+  max_message_size: "64MB"
   idle_timeout: "5m"
 
 logging:

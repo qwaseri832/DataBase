@@ -2,16 +2,15 @@ package wal
 
 import (
 	"bytes"
+	"io"
 
 	"go.uber.org/zap"
 )
 
-// Flusher умеет записать блок байтов (сегмент на диске).
 type Flusher interface {
 	Write(data []byte) error
 }
 
-// Writer кодирует пачку Pending и пишет через Flusher.
 type Writer struct {
 	flusher Flusher
 	logger  *zap.Logger
@@ -22,11 +21,15 @@ func NewWriter(f Flusher, l *zap.Logger) *Writer {
 }
 
 func (w *Writer) Write(batch []Pending) {
+	if len(batch) == 0 {
+		return
+	}
+
 	var buf bytes.Buffer
 	for i := range batch {
 		rec := batch[i].Record()
 		if err := rec.Encode(&buf); err != nil {
-			w.logger.Warn("encode failed", zap.Error(err))
+			w.logger.Warn("encode WAL record", zap.Error(err))
 			ack(batch, err)
 			return
 		}
@@ -34,9 +37,19 @@ func (w *Writer) Write(batch []Pending) {
 
 	err := w.flusher.Write(buf.Bytes())
 	if err != nil {
-		w.logger.Warn("flush failed", zap.Error(err))
+		w.logger.Warn("write WAL batch", zap.Error(err))
 	}
 	ack(batch, err)
+}
+
+func (w *Writer) Close() {
+	c, ok := w.flusher.(io.Closer)
+	if !ok {
+		return
+	}
+	if err := c.Close(); err != nil {
+		w.logger.Warn("close WAL segment", zap.Error(err))
+	}
 }
 
 func ack(batch []Pending, err error) {

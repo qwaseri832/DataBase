@@ -30,7 +30,7 @@ type WALConfig struct {
 }
 
 type ReplicationConfig struct {
-	Role         string        `yaml:"role"` // "master" | "slave"
+	Role         string        `yaml:"role"`
 	MasterAddr   string        `yaml:"master_addr"`
 	SyncInterval time.Duration `yaml:"sync_interval"`
 }
@@ -40,6 +40,8 @@ type ServerConfig struct {
 	MaxClients  int           `yaml:"max_clients"`
 	ReadBuffer  string        `yaml:"read_buffer"`
 	IdleTimeout time.Duration `yaml:"idle_timeout"`
+
+	MaxMessageSize string `yaml:"max_message_size"`
 }
 
 type LoggingConfig struct {
@@ -53,17 +55,24 @@ func LoadFromFile(path string) (*Config, error) {
 		return nil, fmt.Errorf("open config: %w", err)
 	}
 	defer f.Close()
-	return Load(f)
+
+	cfg, err := Load(f)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return cfg, nil
 }
 
 func Load(r io.Reader) (*Config, error) {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
-	}
+	dec := yaml.NewDecoder(r)
+
+	dec.KnownFields(true)
 
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if err := dec.Decode(&cfg); err != nil {
+		if err == io.EOF {
+			return &Config{}, nil
+		}
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	return &cfg, nil

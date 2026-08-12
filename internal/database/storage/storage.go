@@ -3,35 +3,32 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"go.uber.org/zap"
 
-	"spider/internal/database/compute"
-	"spider/internal/database/storage/engine"
-	"spider/internal/database/storage/wal"
-	"spider/internal/tools"
+	"github.com/qwaseri832/DataBase/internal/database/storage/engine"
+	"github.com/qwaseri832/DataBase/internal/database/storage/wal"
+	"github.com/qwaseri832/DataBase/internal/tools"
 )
 
 var (
-	ErrNotFound  = errors.New("not found")
-	ErrReadOnly  = errors.New("read-only: mutable operation on slave")
+	ErrNotFound = errors.New("not found")
+	ErrReadOnly = errors.New("read-only: mutable operation on slave")
 )
 
-// Replica определяет роль узла.
 type Replica interface {
 	IsMaster() bool
 }
 
-// Option настраивает Storage.
 type Option func(*Storage)
 
-func WithWAL(w *wal.WAL) Option      { return func(s *Storage) { s.wal = w } }
-func WithReplica(r Replica) Option   { return func(s *Storage) { s.replica = r } }
+func WithWAL(w *wal.WAL) Option    { return func(s *Storage) { s.wal = w } }
+func WithReplica(r Replica) Option { return func(s *Storage) { s.replica = r } }
 func WithStream(ch <-chan []wal.Record) Option {
 	return func(s *Storage) { s.stream = ch }
 }
 
-// Storage связывает Engine, WAL и Replication.
 type Storage struct {
 	engine  *engine.Engine
 	wal     *wal.WAL
@@ -41,7 +38,7 @@ type Storage struct {
 	logger  *zap.Logger
 }
 
-func New(eng *engine.Engine, logger *zap.Logger, opts ...Option) *Storage {
+func New(eng *engine.Engine, logger *zap.Logger, opts ...Option) (*Storage, error) {
 	s := &Storage{engine: eng, logger: logger}
 	for _, o := range opts {
 		o(s)
@@ -51,37 +48,53 @@ func New(eng *engine.Engine, logger *zap.Logger, opts ...Option) *Storage {
 	if s.wal != nil {
 		recs, err := s.wal.Recover()
 		if err != nil {
-			logger.Error("wal recover", zap.Error(err))
-		} else {
-			lastLSN = s.applyRecords(recs)
+			return nil, fmt.Errorf("recover from WAL: %w", err)
 		}
-	}
-
-	if s.stream != nil {
-		go func() {
-			for recs := range s.stream {
-				s.applyRecords(recs)
-			}
-		}()
+		lastLSN = s.applyRecords(recs)
+		logger.Info("recovered from WAL",
+			zap.Int("records", len(recs)),
+			zap.Int64("last_lsn", lastLSN),
+		)
 	}
 
 	s.idgen = NewIDGen(lastLSN)
-	return s
+	return s, nil
+}
+
+func (s *Storage) ApplyStream(ctx context.Context) {
+	if s.stream == nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case recs, ok := <-s.stream:
+			if !ok {
+				return
+			}
+			s.applyRecords(recs)
+		}
+	}
 }
 
 func (s *Storage) Set(ctx context.Context, key, val string) error {
 	if s.replica != nil && !s.replica.IsMaster() {
 		return ErrReadOnly
 	}
-	if ctx.Err() != nil {
-		return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	txID := s.idgen.Next()
 	ctx = tools.WithTxID(ctx, txID)
 
 	if s.wal != nil {
-		if err := s.wal.Append(txID, compute.CmdSet, []string{key, val}).Await(); err != nil {
+		err, waitErr := s.wal.Append(txID, wal.OpSet, []string{key, val}).AwaitContext(ctx)
+		if waitErr != nil {
+			return waitErr
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -91,11 +104,9 @@ func (s *Storage) Set(ctx context.Context, key, val string) error {
 }
 
 func (s *Storage) Get(ctx context.Context, key string) (string, error) {
-	if ctx.Err() != nil {
-		return "", ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
-	txID := s.idgen.Next()
-	ctx = tools.WithTxID(ctx, txID)
 
 	v, ok := s.engine.Get(ctx, key)
 	if !ok {
@@ -108,15 +119,19 @@ func (s *Storage) Del(ctx context.Context, key string) error {
 	if s.replica != nil && !s.replica.IsMaster() {
 		return ErrReadOnly
 	}
-	if ctx.Err() != nil {
-		return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	txID := s.idgen.Next()
 	ctx = tools.WithTxID(ctx, txID)
 
 	if s.wal != nil {
-		if err := s.wal.Append(txID, compute.CmdDel, []string{key}).Await(); err != nil {
+		err, waitErr := s.wal.Append(txID, wal.OpDel, []string{key}).AwaitContext(ctx)
+		if waitErr != nil {
+			return waitErr
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -131,12 +146,28 @@ func (s *Storage) applyRecords(recs []wal.Record) int64 {
 		if r.LSN > last {
 			last = r.LSN
 		}
+
+		if want := r.Op.ArgCount(); len(r.Args) < want {
+			s.logger.Warn("skipped malformed WAL record",
+				zap.Int64("lsn", r.LSN),
+				zap.Stringer("op", r.Op),
+				zap.Int("args", len(r.Args)),
+				zap.Int("want", want),
+			)
+			continue
+		}
+
 		ctx := tools.WithTxID(context.Background(), r.LSN)
-		switch r.Cmd {
-		case compute.CmdSet:
+		switch r.Op {
+		case wal.OpSet:
 			s.engine.Set(ctx, r.Args[0], r.Args[1])
-		case compute.CmdDel:
+		case wal.OpDel:
 			s.engine.Del(ctx, r.Args[0])
+		default:
+			s.logger.Warn("unknown command in WAL",
+				zap.Int64("lsn", r.LSN),
+				zap.Stringer("op", r.Op),
+			)
 		}
 	}
 	return last

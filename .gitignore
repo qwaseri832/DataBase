@@ -1,7 +1,12 @@
-# Binaries 
-/bin/ 
-*.exe 
-*.log 
-/data/ 
-.idea/ 
-.vscode/ 
+/bin/
+/dist/
+/data/
+
+*.log
+*.exe
+*.test
+*.out
+coverage.html
+
+.idea/
+.vscode/

@@ -1,15 +1,16 @@
 package tools
 
 import (
-	"errors"
+	"fmt"
+	"math"
+	"strconv"
 	"strings"
 )
 
-// ParseByteSize разбирает строки вида "10MB", "4KB", "1GB".
 func ParseByteSize(s string) (int, error) {
 	s = strings.TrimSpace(s)
-	if len(s) == 0 {
-		return 0, errors.New("empty size string")
+	if s == "" {
+		return 0, fmt.Errorf("empty size string")
 	}
 
 	i := 0
@@ -17,25 +18,35 @@ func ParseByteSize(s string) (int, error) {
 		i++
 	}
 	if i == 0 {
-		return 0, errors.New("size must start with a digit")
+		return 0, fmt.Errorf("size must start with a digit: %q", s)
 	}
 
-	n := 0
-	for _, ch := range s[:i] {
-		n = n*10 + int(ch-'0')
+	n, err := strconv.ParseInt(s[:i], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse size %q: %w", s, err)
 	}
 
-	suffix := strings.ToUpper(s[i:])
-	switch suffix {
+	var shift uint
+	switch strings.ToUpper(strings.TrimSpace(s[i:])) {
 	case "GB":
-		return n << 30, nil
+		shift = 30
 	case "MB":
-		return n << 20, nil
+		shift = 20
 	case "KB":
-		return n << 10, nil
+		shift = 10
 	case "B", "":
-		return n, nil
+		shift = 0
 	default:
-		return 0, errors.New("unknown suffix: " + suffix)
+		return 0, fmt.Errorf("unknown size suffix: %q", s[i:])
 	}
+
+	if shift > 0 && n > math.MaxInt64>>shift {
+		return 0, fmt.Errorf("size %q overflows int64", s)
+	}
+	n <<= shift
+
+	if n > math.MaxInt {
+		return 0, fmt.Errorf("size %q overflows int on this platform", s)
+	}
+	return int(n), nil
 }

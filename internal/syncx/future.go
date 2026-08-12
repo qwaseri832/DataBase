@@ -1,36 +1,53 @@
 package syncx
 
-// Future позволяет получить результат, который будет установлен позже.
-type Future[T any] struct {
-	ch <-chan T
-}
+import (
+	"context"
+	"sync"
+)
 
-// Await блокируется до получения значения.
-func (f Future[T]) Await() T {
-	return <-f.ch
-}
-
-// Promise — парная к Future: устанавливает результат ровно один раз.
 type Promise[T any] struct {
-	ch   chan T
-	done bool
+	done chan struct{}
+	once sync.Once
+	val  T
 }
 
 func NewPromise[T any]() *Promise[T] {
-	return &Promise[T]{ch: make(chan T, 1)}
+	return &Promise[T]{done: make(chan struct{})}
 }
 
-// Resolve записывает значение. Повторный вызов игнорируется.
 func (p *Promise[T]) Resolve(val T) {
-	if p.done {
-		return
-	}
-	p.done = true
-	p.ch <- val
-	close(p.ch)
+	p.once.Do(func() {
+		p.val = val
+		close(p.done)
+	})
 }
 
-// Future возвращает Future, привязанный к этому Promise.
 func (p *Promise[T]) Future() Future[T] {
-	return Future[T]{ch: p.ch}
+	return Future[T]{p: p}
+}
+
+type Future[T any] struct {
+	p *Promise[T]
+}
+
+func (f Future[T]) Await() T {
+	if f.p == nil {
+		var zero T
+		return zero
+	}
+	<-f.p.done
+	return f.p.val
+}
+
+func (f Future[T]) AwaitContext(ctx context.Context) (T, error) {
+	var zero T
+	if f.p == nil {
+		return zero, nil
+	}
+	select {
+	case <-f.p.done:
+		return f.p.val, nil
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	}
 }

@@ -2,17 +2,15 @@ package engine
 
 import (
 	"context"
-	"hash/fnv"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
-	"spider/internal/tools"
+	"github.com/qwaseri832/DataBase/internal/tools"
 )
 
-// Option позволяет настроить Engine при создании.
 type Option func(*Engine)
 
-// WithPartitions задаёт количество партиций.
 func WithPartitions(n int) Option {
 	return func(e *Engine) {
 		if n < 1 {
@@ -25,7 +23,6 @@ func WithPartitions(n int) Option {
 	}
 }
 
-// Engine — in-memory хранилище с партиционированием по FNV-1a.
 type Engine struct {
 	parts  []*HashTable
 	logger *zap.Logger
@@ -43,29 +40,52 @@ func New(logger *zap.Logger, opts ...Option) *Engine {
 }
 
 func (e *Engine) Set(ctx context.Context, key, value string) {
-	p := e.partition(key)
-	p.Set(key, value)
-	e.logger.Debug("set", zap.Int64("tx", tools.TxID(ctx)), zap.String("key", key))
+	e.partition(key).Set(key, value)
+	e.debug(ctx, "set", key, false, false)
 }
 
 func (e *Engine) Get(ctx context.Context, key string) (string, bool) {
-	p := e.partition(key)
-	v, ok := p.Get(key)
-	e.logger.Debug("get", zap.Int64("tx", tools.TxID(ctx)), zap.String("key", key), zap.Bool("found", ok))
+	v, ok := e.partition(key).Get(key)
+	e.debug(ctx, "get", key, true, ok)
 	return v, ok
 }
 
 func (e *Engine) Del(ctx context.Context, key string) {
-	p := e.partition(key)
-	p.Del(key)
-	e.logger.Debug("del", zap.Int64("tx", tools.TxID(ctx)), zap.String("key", key))
+	e.partition(key).Del(key)
+	e.debug(ctx, "del", key, false, false)
+}
+
+func (e *Engine) debug(ctx context.Context, msg, key string, withFound, found bool) {
+	ce := e.logger.Check(zapcore.DebugLevel, msg)
+	if ce == nil {
+		return
+	}
+	fields := []zap.Field{
+		zap.Int64("tx", tools.TxID(ctx)),
+		zap.String("key", key),
+	}
+	if withFound {
+		fields = append(fields, zap.Bool("found", found))
+	}
+	ce.Write(fields...)
 }
 
 func (e *Engine) partition(key string) *HashTable {
 	if len(e.parts) == 1 {
 		return e.parts[0]
 	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(key))
-	return e.parts[int(h.Sum32())%len(e.parts)]
+	return e.parts[fnv1a(key)%uint32(len(e.parts))]
+}
+
+func fnv1a(s string) uint32 {
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	h := uint32(offset32)
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= prime32
+	}
+	return h
 }

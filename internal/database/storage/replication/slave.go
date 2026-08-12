@@ -4,22 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
-	"fmt"
+	"path/filepath"
 	"time"
 
 	"go.uber.org/zap"
 
-	"spider/internal/database/filesystem"
-	"spider/internal/database/storage/wal"
+	"github.com/qwaseri832/DataBase/internal/database/filesystem"
+	"github.com/qwaseri832/DataBase/internal/database/storage/wal"
 )
 
-// Sender отправляет данные мастеру и возвращает ответ.
 type Sender interface {
 	Send(data []byte) ([]byte, error)
 	Close()
 }
 
-// Slave периодически запрашивает новые сегменты у мастера.
 type Slave struct {
 	sender   Sender
 	stream   chan []wal.Record
@@ -30,7 +28,13 @@ type Slave struct {
 }
 
 func NewSlave(s Sender, walDir string, interval time.Duration, l *zap.Logger) *Slave {
-	last, _ := filesystem.LastSegment(walDir)
+	if interval <= 0 {
+		interval = time.Second
+	}
+	last, err := filesystem.LastSegment(walDir)
+	if err != nil {
+		l.Warn("determine last segment", zap.Error(err))
+	}
 	return &Slave{
 		sender:   s,
 		stream:   make(chan []wal.Record, 1),
@@ -41,40 +45,45 @@ func NewSlave(s Sender, walDir string, interval time.Duration, l *zap.Logger) *S
 	}
 }
 
-func (s *Slave) IsMaster() bool                  { return false }
-func (s *Slave) Stream() <-chan []wal.Record      { return s.stream }
+func (s *Slave) IsMaster() bool              { return false }
+func (s *Slave) Stream() <-chan []wal.Record { return s.stream }
 
-func (s *Slave) Start(ctx context.Context) {
+func (s *Slave) Run(ctx context.Context) {
 	t := time.NewTicker(s.interval)
-	defer func() { t.Stop(); s.sender.Close() }()
+	defer func() {
+		t.Stop()
+		s.sender.Close()
+
+		close(s.stream)
+	}()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			s.sync()
+			s.sync(ctx)
 		}
 	}
 }
 
-func (s *Slave) sync() {
+func (s *Slave) sync(ctx context.Context) {
 	req := SyncRequest{AfterSegment: s.lastSeg}
 	raw, err := Encode(&req)
 	if err != nil {
-		s.logger.Error("encode request", zap.Error(err))
+		s.logger.Error("encode sync request", zap.Error(err))
 		return
 	}
 
 	respRaw, err := s.sender.Send(raw)
 	if err != nil {
-		s.logger.Error("send request", zap.Error(err))
+		s.logger.Error("send sync request", zap.Error(err))
 		return
 	}
 
 	var resp SyncResponse
 	if err := Decode(&resp, respRaw); err != nil {
-		s.logger.Error("decode response", zap.Error(err))
+		s.logger.Error("decode sync response", zap.Error(err))
 		return
 	}
 
@@ -82,20 +91,27 @@ func (s *Slave) sync() {
 		return
 	}
 
-	// Сохраняем сегмент
-	path := fmt.Sprintf("%s/%s", s.walDir, resp.SegmentName)
-	if err := filesystem.WriteSegment(path, resp.SegmentData); err != nil {
-		s.logger.Error("save segment", zap.Error(err))
+	var recs []wal.Record
+	if err := gob.NewDecoder(bytes.NewReader(resp.SegmentData)).Decode(&recs); err != nil {
+		s.logger.Error("decode segment", zap.String("segment", resp.SegmentName), zap.Error(err))
 		return
 	}
 
-	// Декодируем и отправляем в stream
-	var recs []wal.Record
-	buf := bytes.NewBuffer(resp.SegmentData)
-	if err := gob.NewDecoder(buf).Decode(&recs); err != nil {
-		s.logger.Error("decode records", zap.Error(err))
+	path := filepath.Join(s.walDir, resp.SegmentName)
+	if err := filesystem.WriteSegment(path, resp.SegmentData); err != nil {
+		s.logger.Error("save segment", zap.String("segment", resp.SegmentName), zap.Error(err))
 		return
 	}
-	s.stream <- recs
+
+	select {
+	case s.stream <- recs:
+	case <-ctx.Done():
+		return
+	}
+
 	s.lastSeg = resp.SegmentName
+	s.logger.Info("segment received from master",
+		zap.String("segment", resp.SegmentName),
+		zap.Int("records", len(recs)),
+	)
 }

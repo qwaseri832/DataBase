@@ -1,16 +1,26 @@
-.PHONY: run-server run-cli build clean
+.PHONY: build run-server run-cli test lint fmt clean
 
-CONFIG_FILE_NAME ?=
-
-run-server:
-	CONFIG_FILE_NAME=$(CONFIG_FILE_NAME) go run cmd/server/main.go
-
-run-cli:
-	go run cmd/cli/main.go
+CONFIG ?= config.yml
 
 build:
-	go build -o bin/spider-server cmd/server/main.go
-	go build -o bin/spider-cli cmd/cli/main.go
+	go build -o bin/spider-server ./cmd/server
+	go build -o bin/spider-cli ./cmd/cli
+
+run-server:
+	go run ./cmd/server -config $(CONFIG)
+
+run-cli:
+	go run ./cmd/cli
+
+test:
+	go test -race -count=1 ./...
+
+lint:
+	go vet ./...
+	gofmt -l .
+
+fmt:
+	gofmt -w .
 
 clean:
-	rm -rf bin/
+	rm -rf bin/ data/ spider.log

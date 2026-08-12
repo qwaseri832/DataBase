@@ -11,7 +11,6 @@ var (
 	ErrBadArgCount = errors.New("wrong number of arguments")
 )
 
-// Parser разбирает текстовые запросы.
 type Parser struct{}
 
 func NewParser() *Parser { return &Parser{} }

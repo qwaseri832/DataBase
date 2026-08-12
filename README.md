@@ -1,23 +1,16 @@
-markdown
-# 🕷️ Spider - Distributed Key-Value Store
+# Spider — key-value хранилище с WAL и репликацией
 
-[![Go Version](https://img.shields.io/badge/Go-1.26-blue.svg)](https://golang.org/)
+[![CI](https://github.com/qwaseri832/DataBase/actions/workflows/ci.yml/badge.svg)](https://github.com/qwaseri832/DataBase/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**Spider** — это легковесное распределённое key-value хранилище с поддержкой WAL (Write-Ahead Log), репликацией Master-Slave и TCP-интерфейсом.
+In-memory key-value хранилище с журналом упреждающей записи (WAL),
+репликацией master–slave и TCP-интерфейсом.
 
-## ✨ Особенности
+Учебный проект: цель — разобрать, как устроены долговечность, батчинг записи
+на диск и потоковый сетевой протокол, а не конкурировать с Redis.
 
-- 🚀 **Высокая производительность** — in-memory движок с партиционированием
-- 💾 **Долговечность** — WAL гарантирует сохранность данных
-- 🔄 **Репликация** — Master-Slave синхронизация через WAL-сегменты
-- 📦 **Пакетная запись** — батчинг для оптимальной работы с диском
-- 🔌 **Простой TCP-протокол** — легко интегрируется с любыми языками
-- ⚡ **Потокобезопасность** — все операции безопасны для конкурентного доступа
-
-
-
-## 📋 Команды
+## Команды
 
 | Команда | Формат | Ответ |
 |---------|--------|-------|
@@ -25,66 +18,134 @@ markdown
 | GET | `GET <key>` | `[ok] <value>` или `[not found]` |
 | DEL | `DEL <key>` | `[ok]` |
 
-## 🚀 Быстрый старт
+Регистр команды значения не имеет. Ключ и значение не могут содержать пробелов.
 
-### Установка
+## Быстрый старт
 
 ```bash
-git clone https://github.com/yourusername/spider.git
-cd spider
-go build -o spider-server ./cmd/server
-go build -o spider-client ./cmd/client
-Запуск сервера (Master)
-bash
-./spider-server --config config.yml
+git clone https://github.com/qwaseri832/DataBase.git
+cd DataBase
+make build
+```
 
+Без `make`:
 
-📁 Структура проекта
+```bash
+go build -o bin/spider-server ./cmd/server
+go build -o bin/spider-cli ./cmd/cli
+```
 
-spider/
-├── cmd/
-│   ├── server/          # Точка входа сервера
-│   └── client/          # Точка входа клиента
-├── internal/
-│   ├── bootstrap/       # Сборка и запуск компонентов
-│   ├── config/          # Парсинг конфигурации
-│   ├── database/
-│   │   ├── compute/     # Парсер команд (SET/GET/DEL)
-│   │   ├── filesystem/  # Работа с файлами сегментов
-│   │   └── storage/
-│   │       ├── engine/  # In-memory хеш-таблица с партициями
-│   │       ├── wal/     # Write-Ahead Log
-│   │       └── replication/ # Master-Slave репликация
-│   ├── network/         # TCP сервер и клиент
-│   ├── syncx/           # Утилиты: Future, Promise, Semaphore
-│   └── tools/           # Вспомогательные функции
-├── config.yml           # Пример конфигурации
-└── go.mod
-🧪 Тестирование
-bash
-go test ./...
-📊 Производительность
-Партиционирование — ключи распределяются по партициям через FNV-1a хеш
+Сервер:
 
-Конкурентность — каждая партиция имеет свой RWMutex
+```bash
+./bin/spider-server -config config.yml
+```
 
-Пакетная запись — WAL накапливает операции и пишет батчами
+Без `-config` узел поднимается на `:4200` в памяти, без WAL и репликации.
+Путь можно задать и переменной `CONFIG_FILE_NAME`.
 
-🤝 Вклад в проект
-Приветствуются issues и pull requests!
+Клиент:
 
-Форкните репозиторий
+```bash
+./bin/spider-cli -addr 127.0.0.1:4200
+```
 
-Создайте ветку для фичи (git checkout -b feature/amazing)
+```
+[spider] > SET user Дмитрий
+[ok]
+[spider] > GET user
+[ok] Дмитрий
+[spider] > DEL user
+[ok]
+[spider] > GET user
+[not found]
+```
 
-Закоммитьте изменения (git commit -m 'Add amazing feature')
+## Устройство
 
-Запушьте (git push origin feature/amazing)
+```
+cmd/
+  server/                точка входа сервера
+  cli/                   интерактивный клиент
+internal/
+  bootstrap/             сборка компонентов и запуск
+  config/                разбор YAML
+  network/               TCP-сервер, клиент и фрейминг сообщений
+  syncx/                 Future/Promise и семафор
+  tools/                 разбор размеров, transaction id в контексте
+  database/
+    compute/             разбор команд
+    filesystem/          файлы-сегменты WAL
+    storage/
+      engine/            хеш-таблица с партиционированием
+      wal/               журнал упреждающей записи с батчингом
+      replication/       master–slave
+```
 
-Откройте Pull Request
+### Сетевой протокол
 
-📝 Лицензия
-MIT © 2024
+Сообщения передаются с 4-байтовым префиксом длины (big-endian):
 
-⭐ Если проект полезен, поставьте звезду на GitHub!
+```
++--------+--------------------+
+| uint32 |      payload       |
++--------+--------------------+
+```
 
+TCP — поток байтов, а не последовательность сообщений: один `Read` может
+вернуть половину запроса или сразу два подряд. Явные границы нужны и
+клиентскому протоколу, и репликации, которая передаёт WAL-сегменты в
+двоичном виде.
+
+### Долговечность
+
+`SET` и `DEL` возвращают `[ok]` только после того, как запись физически
+попала в сегмент WAL. Записи копятся в батч и сбрасываются либо по
+достижении `batch_size`, либо по `batch_timeout` — что наступит раньше.
+Вызывающий получает `Future`, который разрешается после `fsync`.
+
+При старте узел проигрывает все сегменты и продолжает нумерацию LSN с
+последней восстановленной записи.
+
+### Репликация
+
+Реплика периодически спрашивает у мастера сегмент, следующий за её
+последним, сохраняет его у себя и применяет к своему движку. Изменяющие
+операции на реплике отклоняются с `read-only: mutable operation on slave`.
+
+## Конфигурация
+
+Пример — в [config.yml](config.yml). Неизвестные ключи считаются ошибкой:
+опечатка в имени параметра не должна молча превращаться в значение по
+умолчанию.
+
+| Секция | Ключ | Значение по умолчанию |
+|---|---|---|
+| `engine` | `partitions` | 1 |
+| `wal` | `batch_size` | 100 |
+| `wal` | `batch_timeout` | 10ms |
+| `wal` | `segment_max_size` | 10MB |
+| `wal` | `directory` | ./data/wal |
+| `server` | `addr` | :4200 |
+| `server` | `max_clients` | без ограничения |
+| `server` | `max_message_size` | 64MB |
+| `replication` | `role` | без репликации |
+| `logging` | `level` | info |
+
+Секция целиком необязательна: без `wal` узел работает без журнала, без
+`replication` — одиночным.
+
+## Разработка
+
+```bash
+make test    # go test -race ./...
+make lint    # go vet + gofmt -l
+make fmt
+```
+
+Тесты `-race` здесь обязательны: часть кода — про синхронизацию (батчинг
+WAL, Promise, семафор), и без детектора гонок регрессии в них не видно.
+
+## Лицензия
+
+[MIT](LICENSE)

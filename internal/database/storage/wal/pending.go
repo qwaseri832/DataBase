@@ -1,17 +1,16 @@
 package wal
 
-import "spider/internal/syncx"
+import "github.com/qwaseri832/DataBase/internal/syncx"
 
-// Pending оборачивает Record и Promise для уведомления вызывающего.
 type Pending struct {
 	rec     Record
 	promise *syncx.Promise[error]
 }
 
-func newPending(lsn int64, cmd int, args []string) Pending {
+func newPending(lsn int64, op Op, args []string) Pending {
 	p := syncx.NewPromise[error]()
 	return Pending{
-		rec:     Record{LSN: lsn, Cmd: cmd, Args: args},
+		rec:     Record{LSN: lsn, Op: op, Args: args},
 		promise: p,
 	}
 }

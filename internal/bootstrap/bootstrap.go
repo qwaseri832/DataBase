@@ -3,132 +3,146 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"fmt"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/sync/errgroup"
 
-	"spider/internal/config"
-	"spider/internal/database"
-	"spider/internal/database/compute"
-	"spider/internal/database/filesystem"
-	"spider/internal/database/storage"
-	"spider/internal/database/storage/engine"
-	"spider/internal/database/storage/replication"
-	"spider/internal/database/storage/wal"
-	"spider/internal/network"
-	"spider/internal/tools"
+	"github.com/qwaseri832/DataBase/internal/config"
+	"github.com/qwaseri832/DataBase/internal/database"
+	"github.com/qwaseri832/DataBase/internal/database/compute"
+	"github.com/qwaseri832/DataBase/internal/database/filesystem"
+	"github.com/qwaseri832/DataBase/internal/database/storage"
+	"github.com/qwaseri832/DataBase/internal/database/storage/engine"
+	"github.com/qwaseri832/DataBase/internal/database/storage/replication"
+	"github.com/qwaseri832/DataBase/internal/database/storage/wal"
+	"github.com/qwaseri832/DataBase/internal/network"
+	"github.com/qwaseri832/DataBase/internal/tools"
 )
 
-// App содержит все компоненты, готовые к запуску.
+const (
+	defaultWALDir       = "./data/wal"
+	defaultSegmentSize  = 10 << 20
+	defaultBatchSize    = 100
+	defaultBatchTimeout = 10 * time.Millisecond
+	defaultSyncInterval = time.Second
+	defaultServerAddr   = ":4200"
+	defaultLogFile      = "spider.log"
+)
+
 type App struct {
-	db     *database.Database
-	server *network.TCPServer
-	wal    *wal.WAL
-	master *replication.Master
-	slave  *replication.Slave
-	logger *zap.Logger
+	db      *database.Database
+	storage *storage.Storage
+	server  *network.TCPServer
+	wal     *wal.WAL
+	master  *replication.Master
+	slave   *replication.Slave
+	logger  *zap.Logger
 }
 
 func New(cfg *config.Config) (*App, error) {
 	if cfg == nil {
-		return nil, errors.New("nil config")
+		return nil, errors.New("config is nil")
 	}
 
 	logger, err := buildLogger(cfg.Logging)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("logger: %w", err)
 	}
 
 	w, err := buildWAL(cfg.WAL, logger)
 	if err != nil {
-		return nil, err
-	}
-
-	eng := buildEngine(cfg.Engine, logger)
-	srv, err := buildServer(cfg.Server, logger)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("WAL: %w", err)
 	}
 
 	master, slave, err := buildReplication(cfg.Replication, cfg.WAL, logger)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("replication: %w", err)
 	}
 
-	// Собираем Storage
+	srv, err := buildServer(cfg.Server, logger)
+	if err != nil {
+		return nil, fmt.Errorf("server: %w", err)
+	}
+
 	var sOpts []storage.Option
 	if w != nil {
 		sOpts = append(sOpts, storage.WithWAL(w))
 	}
-	if master != nil {
+	switch {
+	case master != nil:
 		sOpts = append(sOpts, storage.WithReplica(master))
-	} else if slave != nil {
-		sOpts = append(sOpts, storage.WithReplica(slave))
-		sOpts = append(sOpts, storage.WithStream(slave.Stream()))
+	case slave != nil:
+		sOpts = append(sOpts, storage.WithReplica(slave), storage.WithStream(slave.Stream()))
 	}
 
-	st := storage.New(eng, logger, sOpts...)
-	parser := compute.NewParser()
-	db := database.New(parser, st, logger)
+	st, err := storage.New(buildEngine(cfg.Engine, logger), logger, sOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("storage: %w", err)
+	}
 
 	return &App{
-		db: db, server: srv, wal: w,
-		master: master, slave: slave,
-		logger: logger,
+		db:      database.New(compute.NewParser(), st, logger),
+		storage: st,
+		server:  srv,
+		wal:     w,
+		master:  master,
+		slave:   slave,
+		logger:  logger,
 	}, nil
 }
 
-// Run запускает все подсистемы и блокируется.
 func (a *App) Run(ctx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 
 	if a.wal != nil {
-		if a.slave != nil {
-			g.Go(func() error { a.slave.Start(gctx); return nil })
-		} else {
-			g.Go(func() error { a.wal.Start(gctx); return nil })
-		}
-		if a.master != nil {
-			g.Go(func() error { a.master.Start(gctx); return nil })
-		}
+		g.Go(func() error { a.wal.Run(gctx); return nil })
+	}
+	if a.master != nil {
+		g.Go(func() error { a.master.Run(gctx); return nil })
+	}
+	if a.slave != nil {
+		g.Go(func() error { a.slave.Run(gctx); return nil })
+		g.Go(func() error { a.storage.ApplyStream(gctx); return nil })
 	}
 
 	g.Go(func() error {
 		a.server.Serve(gctx, func(ctx context.Context, req []byte) []byte {
-			resp := a.db.Handle(ctx, string(req))
-			return []byte(resp)
+			return []byte(a.db.Handle(ctx, string(req)))
 		})
 		return nil
 	})
+
+	a.logger.Info("spider started", zap.String("addr", a.server.Addr().String()))
 
 	err := g.Wait()
 	_ = a.logger.Sync()
 	return err
 }
 
-// ---- builders ----
-
 func buildLogger(cfg *config.LoggingConfig) (*zap.Logger, error) {
 	level := zapcore.InfoLevel
-	output := "spider.log"
+	output := defaultLogFile
+
 	if cfg != nil {
 		if cfg.File != "" {
 			output = cfg.File
 		}
-		switch cfg.Level {
-		case "debug":
-			level = zapcore.DebugLevel
-		case "warn":
-			level = zapcore.WarnLevel
-		case "error":
-			level = zapcore.ErrorLevel
+		if cfg.Level != "" {
+			if err := level.UnmarshalText([]byte(cfg.Level)); err != nil {
+				return nil, fmt.Errorf("unknown log level %q", cfg.Level)
+			}
 		}
 	}
+
 	return zap.Config{
-		Encoding:    "json",
-		Level:       zap.NewAtomicLevelAt(level),
-		OutputPaths: []string{output},
+		Encoding:         "json",
+		Level:            zap.NewAtomicLevelAt(level),
+		OutputPaths:      []string{output, "stderr"},
+		ErrorOutputPaths: []string{"stderr"},
+		EncoderConfig:    zap.NewProductionEncoderConfig(),
 	}.Build()
 }
 
@@ -144,55 +158,55 @@ func buildWAL(cfg *config.WALConfig, logger *zap.Logger) (*wal.WAL, error) {
 	if cfg == nil {
 		return nil, nil
 	}
-	dir := cfg.Directory
-	if dir == "" {
-		dir = "./data/wal"
-	}
-	maxSeg := 10 << 20 // 10MB default
+
+	dir := orString(cfg.Directory, defaultWALDir)
+
+	maxSeg := defaultSegmentSize
 	if cfg.SegmentMaxSize != "" {
 		n, err := tools.ParseByteSize(cfg.SegmentMaxSize)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("segment_max_size: %w", err)
 		}
 		maxSeg = n
 	}
-	batchSize := cfg.BatchSize
-	if batchSize == 0 {
-		batchSize = 100
-	}
-	timeout := cfg.BatchTimeout
-	if timeout == 0 {
-		timeout = 10_000_000 // 10ms
-	}
 
-	scanner := filesystem.NewDirScanner(dir)
-	reader := wal.NewReader(scanner)
-	seg := filesystem.NewSegment(dir, maxSeg)
-	writer := wal.NewWriter(seg, logger)
+	reader := wal.NewReader(filesystem.NewDirScanner(dir))
+	writer := wal.NewWriter(filesystem.NewSegment(dir, maxSeg), logger)
 
-	return wal.New(writer, reader, timeout, batchSize), nil
+	return wal.New(writer, reader,
+		orDuration(cfg.BatchTimeout, defaultBatchTimeout),
+		orInt(cfg.BatchSize, defaultBatchSize),
+	), nil
 }
 
 func buildServer(cfg *config.ServerConfig, logger *zap.Logger) (*network.TCPServer, error) {
-	addr := ":4200"
+	addr := defaultServerAddr
 	var opts []network.ServerOpt
+
 	if cfg != nil {
-		if cfg.Addr != "" {
-			addr = cfg.Addr
-		}
+		addr = orString(cfg.Addr, defaultServerAddr)
 		if cfg.MaxClients > 0 {
 			opts = append(opts, network.WithServerMaxClients(cfg.MaxClients))
 		}
 		if cfg.ReadBuffer != "" {
-			n, _ := tools.ParseByteSize(cfg.ReadBuffer)
-			if n > 0 {
-				opts = append(opts, network.WithServerBuffer(n))
+			n, err := tools.ParseByteSize(cfg.ReadBuffer)
+			if err != nil {
+				return nil, fmt.Errorf("read_buffer: %w", err)
 			}
+			opts = append(opts, network.WithServerBuffer(n))
+		}
+		if cfg.MaxMessageSize != "" {
+			n, err := tools.ParseByteSize(cfg.MaxMessageSize)
+			if err != nil {
+				return nil, fmt.Errorf("max_message_size: %w", err)
+			}
+			opts = append(opts, network.WithServerMaxMessage(n))
 		}
 		if cfg.IdleTimeout > 0 {
 			opts = append(opts, network.WithServerTimeout(cfg.IdleTimeout))
 		}
 	}
+
 	return network.ListenTCP(addr, logger, opts...)
 }
 
@@ -201,37 +215,56 @@ func buildReplication(
 	walCfg *config.WALConfig,
 	logger *zap.Logger,
 ) (*replication.Master, *replication.Slave, error) {
-	if repCfg == nil {
+	if repCfg == nil || repCfg.Role == "" {
 		return nil, nil, nil
 	}
 	if walCfg == nil {
-		return nil, nil, errors.New("replication requires WAL")
+		return nil, nil, errors.New("replication requires WAL to be enabled")
+	}
+	if repCfg.MasterAddr == "" {
+		return nil, nil, errors.New("master_addr is required")
 	}
 
-	walDir := walCfg.Directory
-	if walDir == "" {
-		walDir = "./data/wal"
-	}
+	walDir := orString(walCfg.Directory, defaultWALDir)
 
-	interval := repCfg.SyncInterval
-	if interval == 0 {
-		interval = 1_000_000_000 // 1s
-	}
-
-	if repCfg.Role == "master" {
+	switch repCfg.Role {
+	case "master":
 		srv, err := network.ListenTCP(repCfg.MasterAddr, logger)
 		if err != nil {
 			return nil, nil, err
 		}
-		m := replication.NewMaster(srv, walDir, logger)
-		return m, nil, nil
-	}
+		return replication.NewMaster(srv, walDir, logger), nil, nil
 
-	// slave
-	client, err := network.DialTCP(repCfg.MasterAddr)
-	if err != nil {
-		return nil, nil, err
+	case "slave":
+		client, err := network.DialTCP(repCfg.MasterAddr)
+		if err != nil {
+			return nil, nil, err
+		}
+		interval := orDuration(repCfg.SyncInterval, defaultSyncInterval)
+		return nil, replication.NewSlave(client, walDir, interval, logger), nil
+
+	default:
+		return nil, nil, fmt.Errorf("unknown replication role %q, want master or slave", repCfg.Role)
 	}
-	s := replication.NewSlave(client, walDir, interval, logger)
-	return nil, s, nil
+}
+
+func orString(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
+}
+
+func orInt(v, fallback int) int {
+	if v <= 0 {
+		return fallback
+	}
+	return v
+}
+
+func orDuration(v, fallback time.Duration) time.Duration {
+	if v <= 0 {
+		return fallback
+	}
+	return v
 }

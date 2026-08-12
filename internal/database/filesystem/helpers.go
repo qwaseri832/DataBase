@@ -3,23 +3,35 @@ package filesystem
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 )
 
-// NextSegment возвращает имя следующего сегмента после given (или "" если нет).
-func NextSegment(dir, after string) (string, error) {
+func segmentNames(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return "", fmt.Errorf("scan dir: %w", err)
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read dir %s: %w", dir, err)
 	}
 
-	var names []string
+	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), SegmentPrefix) {
 			names = append(names, e.Name())
 		}
 	}
 	sort.Strings(names)
+	return names, nil
+}
+
+func NextSegment(dir, after string) (string, error) {
+	names, err := segmentNames(dir)
+	if err != nil {
+		return "", err
+	}
 
 	idx := upperBound(names, after)
 	if idx < len(names) {
@@ -28,38 +40,48 @@ func NextSegment(dir, after string) (string, error) {
 	return "", nil
 }
 
-// LastSegment возвращает имя последнего файла-сегмента.
 func LastSegment(dir string) (string, error) {
-	entries, err := os.ReadDir(dir)
+	names, err := segmentNames(dir)
 	if err != nil {
 		return "", err
 	}
-	for i := len(entries) - 1; i >= 0; i-- {
-		if !entries[i].IsDir() {
-			return entries[i].Name(), nil
-		}
+	if len(names) == 0 {
+		return "", nil
 	}
-	return "", nil
+	return names[len(names)-1], nil
 }
 
-// WriteSegment создаёт файл и записывает data.
 func WriteSegment(path string, data []byte) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0644)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create dir %s: %w", dir, err)
+	}
+
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = f.Write(data)
-	if err != nil {
+	defer func() {
+		tmp.Close()
+		os.Remove(tmp.Name())
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
-	return f.Sync()
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 func upperBound(a []string, target string) int {
 	lo, hi := 0, len(a)
 	for lo < hi {
-		mid := (lo + hi) / 2
+		mid := int(uint(lo+hi) >> 1)
 		if a[mid] <= target {
 			lo = mid + 1
 		} else {

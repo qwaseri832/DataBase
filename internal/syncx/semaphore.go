@@ -1,6 +1,7 @@
 package syncx
 
-// Semaphore ограничивает число одновременных операций.
+import "context"
+
 type Semaphore struct {
 	slots chan struct{}
 }
@@ -17,6 +18,18 @@ func (s *Semaphore) Acquire() {
 		return
 	}
 	s.slots <- struct{}{}
+}
+
+func (s *Semaphore) AcquireContext(ctx context.Context) bool {
+	if s.slots == nil {
+		return true
+	}
+	select {
+	case s.slots <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (s *Semaphore) Release() {

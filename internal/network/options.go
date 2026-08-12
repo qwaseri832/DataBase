@@ -2,9 +2,7 @@ package network
 
 import "time"
 
-const defaultBufSize = 4 << 10 // 4KB
-
-// --- Client options ---
+const defaultBufSize = 4 << 10
 
 type ClientOpt func(*TCPClient)
 
@@ -13,10 +11,12 @@ func WithClientTimeout(d time.Duration) ClientOpt {
 }
 
 func WithClientBuffer(n int) ClientOpt {
-	return func(c *TCPClient) { c.bufSize = n }
+	return func(c *TCPClient) {
+		if n > 0 {
+			c.bufSize = n
+		}
+	}
 }
-
-// --- Server options ---
 
 type ServerOpt func(*TCPServer)
 
@@ -25,7 +25,19 @@ func WithServerTimeout(d time.Duration) ServerOpt {
 }
 
 func WithServerBuffer(n int) ServerOpt {
-	return func(s *TCPServer) { s.bufSize = n }
+	return func(s *TCPServer) {
+		if n > 0 {
+			s.bufSize = n
+		}
+	}
+}
+
+func WithServerMaxMessage(n int) ServerOpt {
+	return func(s *TCPServer) {
+		if n > 0 {
+			s.maxMessage = n
+		}
+	}
 }
 
 func WithServerMaxClients(n int) ServerOpt {

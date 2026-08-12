@@ -6,12 +6,10 @@ import (
 	"sort"
 )
 
-// Scanner перебирает сегменты.
 type Scanner interface {
 	ForEach(fn func(data []byte) error) error
 }
 
-// Reader восстанавливает все Record из сегментов.
 type Reader struct {
 	scanner Scanner
 }

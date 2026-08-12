@@ -2,55 +2,73 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"time"
 
-	"spider/internal/network"
-	"spider/internal/tools"
+	"github.com/qwaseri832/DataBase/internal/network"
+	"github.com/qwaseri832/DataBase/internal/tools"
 )
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:4200", "server address")
-	timeout := flag.Duration("timeout", time.Minute, "idle timeout")
-	bufStr := flag.String("buf", "4KB", "read buffer size")
+	timeout := flag.Duration("timeout", time.Minute, "request timeout")
+	bufStr := flag.String("buf", "4KB", "i/o buffer size")
 	flag.Parse()
 
-	bufSize, err := tools.ParseByteSize(*bufStr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "bad buffer size: %v\n", err)
+	if err := run(*addr, *timeout, *bufStr, os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "spider-cli: %v\n", err)
 		os.Exit(1)
 	}
+}
 
-	client, err := network.DialTCP(*addr,
-		network.WithClientTimeout(*timeout),
+func run(addr string, timeout time.Duration, bufStr string, stdin io.Reader, stdout io.Writer) error {
+	bufSize, err := tools.ParseByteSize(bufStr)
+	if err != nil {
+		return fmt.Errorf("buffer size: %w", err)
+	}
+
+	client, err := network.DialTCP(addr,
+		network.WithClientTimeout(timeout),
 		network.WithClientBuffer(bufSize),
 	)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "connect failed: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	defer client.Close()
 
-	scanner := bufio.NewScanner(os.Stdin)
+	scanner := bufio.NewScanner(stdin)
 	for {
-		fmt.Print("[spider] > ")
+		fmt.Fprint(stdout, "[spider] > ")
 		if !scanner.Scan() {
 			break
 		}
 
-		line := scanner.Text()
-		if line == "" {
+		line := strings.TrimSpace(scanner.Text())
+		switch line {
+		case "":
 			continue
+		case "exit", "quit":
+			return nil
 		}
 
 		resp, err := client.Send([]byte(line))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			break
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return fmt.Errorf("connection closed by server")
+			}
+			return err
 		}
-
-		fmt.Println(string(resp))
+		fmt.Fprintln(stdout, string(resp))
 	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read input: %w", err)
+	}
+	fmt.Fprintln(stdout)
+	return nil
 }

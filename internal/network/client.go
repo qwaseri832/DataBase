@@ -1,48 +1,61 @@
 package network
 
 import (
-	"errors"
+	"bufio"
 	"fmt"
-	"io"
 	"net"
+	"sync"
 	"time"
 )
 
-// TCPClient — клиент для отправки запросов серверу.
 type TCPClient struct {
 	conn    net.Conn
+	r       *bufio.Reader
+	w       *bufio.Writer
 	timeout time.Duration
 	bufSize int
+
+	mu sync.Mutex
 }
 
 func DialTCP(addr string, opts ...ClientOpt) (*TCPClient, error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("dial: %w", err)
+		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
 
 	c := &TCPClient{conn: conn, bufSize: defaultBufSize}
 	for _, o := range opts {
 		o(c)
 	}
+
+	c.r = bufio.NewReaderSize(conn, c.bufSize)
+	c.w = bufio.NewWriterSize(conn, c.bufSize)
 	return c, nil
 }
 
 func (c *TCPClient) Send(req []byte) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.timeout > 0 {
-		_ = c.conn.SetDeadline(time.Now().Add(c.timeout))
+		if err := c.conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+			return nil, err
+		}
 	}
 
-	if _, err := c.conn.Write(req); err != nil {
-		return nil, err
+	if err := WriteFrame(c.w, req); err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	if err := c.w.Flush(); err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
 	}
 
-	buf := make([]byte, c.bufSize)
-	n, err := c.conn.Read(buf)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
+	resp, err := ReadFrame(c.r, DefaultMaxFrameSize)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
 	}
-	return buf[:n], nil
+	return resp, nil
 }
 
 func (c *TCPClient) Close() {

@@ -2,20 +2,18 @@ package replication
 
 import (
 	"context"
-	"fmt"
 	"os"
+	"path/filepath"
 
 	"go.uber.org/zap"
 
-	"spider/internal/database/filesystem"
+	"github.com/qwaseri832/DataBase/internal/database/filesystem"
 )
 
-// Acceptor принимает соединения и вызывает handler для каждого запроса.
 type Acceptor interface {
 	Serve(ctx context.Context, handler func(ctx context.Context, req []byte) []byte)
 }
 
-// Master отдаёт WAL-сегменты по запросу.
 type Master struct {
 	acceptor Acceptor
 	walDir   string
@@ -28,16 +26,19 @@ func NewMaster(a Acceptor, walDir string, l *zap.Logger) *Master {
 
 func (m *Master) IsMaster() bool { return true }
 
-func (m *Master) Start(ctx context.Context) {
+func (m *Master) Run(ctx context.Context) {
 	m.acceptor.Serve(ctx, func(_ context.Context, raw []byte) []byte {
 		var req SyncRequest
 		if err := Decode(&req, raw); err != nil {
 			m.logger.Error("decode sync request", zap.Error(err))
 			return nil
 		}
-		data, err := Encode(new(m.handle(req)))
+
+		resp := m.handle(req)
+		data, err := Encode(&resp)
 		if err != nil {
 			m.logger.Error("encode sync response", zap.Error(err))
+			return nil
 		}
 		return data
 	})
@@ -52,9 +53,10 @@ func (m *Master) handle(req SyncRequest) SyncResponse {
 	if next == "" {
 		return SyncResponse{OK: true}
 	}
-	data, err := os.ReadFile(fmt.Sprintf("%s/%s", m.walDir, next))
+
+	data, err := os.ReadFile(filepath.Join(m.walDir, next))
 	if err != nil {
-		m.logger.Error("read segment", zap.Error(err))
+		m.logger.Error("read segment", zap.String("segment", next), zap.Error(err))
 		return SyncResponse{}
 	}
 	return SyncResponse{OK: true, SegmentName: next, SegmentData: data}

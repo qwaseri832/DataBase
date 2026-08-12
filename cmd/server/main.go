@@ -2,35 +2,47 @@ package main
 
 import (
 	"context"
-	"log"
+	"errors"
+	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"spider/internal/config"
-	"spider/internal/bootstrap"
+	"github.com/qwaseri832/DataBase/internal/bootstrap"
+	"github.com/qwaseri832/DataBase/internal/config"
 )
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
+	path := flag.String("config", os.Getenv("CONFIG_FILE_NAME"),
+		"path to YAML config (may also be set via CONFIG_FILE_NAME)")
+	flag.Parse()
+
+	if err := run(*path); err != nil {
+		fmt.Fprintf(os.Stderr, "spider-server: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run(path string) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	cfg := &config.Config{}
-
-	if path := os.Getenv("CONFIG_FILE_NAME"); path != "" {
+	if path != "" {
 		var err error
-		cfg, err = config.LoadFromFile(path)
-		if err != nil {
-			log.Fatalf("failed to load config: %v", err)
+		if cfg, err = config.LoadFromFile(path); err != nil {
+			return err
 		}
 	}
 
 	app, err := bootstrap.New(cfg)
 	if err != nil {
-		log.Fatalf("failed to bootstrap: %v", err)
+		return err
 	}
 
-	if err := app.Run(ctx); err != nil {
-		log.Fatalf("server stopped with error: %v", err)
+	if err := app.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		return err
 	}
+	return nil
 }

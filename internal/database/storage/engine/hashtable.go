@@ -2,7 +2,6 @@ package engine
 
 import "sync"
 
-// HashTable — потокобезопасная хэш-таблица для одной партиции.
 type HashTable struct {
 	mu   sync.RWMutex
 	data map[string]string
