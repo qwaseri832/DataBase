@@ -51,6 +51,7 @@ func New(eng *engine.Engine, logger *zap.Logger, opts ...Option) (*Storage, erro
 			return nil, fmt.Errorf("recover from WAL: %w", err)
 		}
 		lastLSN = s.applyRecords(recs)
+		s.wal.OnFlush(func(recs []wal.Record) { s.applyRecords(recs) })
 		logger.Info("recovered from WAL",
 			zap.Int("records", len(recs)),
 			zap.Int64("last_lsn", lastLSN),
@@ -79,28 +80,9 @@ func (s *Storage) ApplyStream(ctx context.Context) {
 }
 
 func (s *Storage) Set(ctx context.Context, key, val string) error {
-	if s.replica != nil && !s.replica.IsMaster() {
-		return ErrReadOnly
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	txID := s.idgen.Next()
-	ctx = tools.WithTxID(ctx, txID)
-
-	if s.wal != nil {
-		err, waitErr := s.wal.Append(txID, wal.OpSet, []string{key, val}).AwaitContext(ctx)
-		if waitErr != nil {
-			return waitErr
-		}
-		if err != nil {
-			return err
-		}
-	}
-
-	s.engine.Set(ctx, key, val)
-	return nil
+	return s.mutate(ctx, wal.OpSet, []string{key, val}, func(ctx context.Context) {
+		s.engine.Set(ctx, key, val)
+	})
 }
 
 func (s *Storage) Get(ctx context.Context, key string) (string, error) {
@@ -116,6 +98,12 @@ func (s *Storage) Get(ctx context.Context, key string) (string, error) {
 }
 
 func (s *Storage) Del(ctx context.Context, key string) error {
+	return s.mutate(ctx, wal.OpDel, []string{key}, func(ctx context.Context) {
+		s.engine.Del(ctx, key)
+	})
+}
+
+func (s *Storage) mutate(ctx context.Context, op wal.Op, args []string, apply func(context.Context)) error {
 	if s.replica != nil && !s.replica.IsMaster() {
 		return ErrReadOnly
 	}
@@ -123,21 +111,16 @@ func (s *Storage) Del(ctx context.Context, key string) error {
 		return err
 	}
 
-	txID := s.idgen.Next()
-	ctx = tools.WithTxID(ctx, txID)
-
-	if s.wal != nil {
-		err, waitErr := s.wal.Append(txID, wal.OpDel, []string{key}).AwaitContext(ctx)
-		if waitErr != nil {
-			return waitErr
-		}
-		if err != nil {
-			return err
-		}
+	if s.wal == nil {
+		apply(tools.WithTxID(ctx, s.idgen.Next()))
+		return nil
 	}
 
-	s.engine.Del(ctx, key)
-	return nil
+	res, err := s.wal.Append(op, args).AwaitContext(ctx)
+	if err != nil {
+		return err
+	}
+	return res
 }
 
 func (s *Storage) applyRecords(recs []wal.Record) int64 {

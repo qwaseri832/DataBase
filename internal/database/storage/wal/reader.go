@@ -1,9 +1,8 @@
 package wal
 
 import (
-	"bytes"
-	"fmt"
-	"sort"
+	"cmp"
+	"slices"
 )
 
 type Scanner interface {
@@ -20,23 +19,19 @@ func NewReader(s Scanner) *Reader {
 
 func (r *Reader) ReadAll() ([]Record, error) {
 	var recs []Record
+
 	err := r.scanner.ForEach(func(data []byte) error {
-		buf := bytes.NewBuffer(data)
-		for buf.Len() > 0 {
-			var rec Record
-			if err := rec.Decode(buf); err != nil {
-				return fmt.Errorf("decode record: %w", err)
-			}
-			recs = append(recs, rec)
+		segment, err := DecodeSegment(data)
+		if err != nil {
+			return err
 		}
+		recs = append(recs, segment...)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	sort.Slice(recs, func(i, j int) bool {
-		return recs[i].LSN < recs[j].LSN
-	})
+	slices.SortFunc(recs, func(a, b Record) int { return cmp.Compare(a.LSN, b.LSN) })
 	return recs, nil
 }

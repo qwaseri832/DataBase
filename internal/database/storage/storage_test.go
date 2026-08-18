@@ -115,32 +115,43 @@ func TestRecoveryFromWAL(t *testing.T) {
 		)
 	}
 
+	runWAL := func(w *wal.WAL) func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		stopped := make(chan struct{})
+		go func() {
+			w.Run(ctx)
+			close(stopped)
+		}()
+
+		return func() {
+			cancel()
+			select {
+			case <-stopped:
+			case <-time.After(5 * time.Second):
+				t.Fatal("WAL не остановился")
+			}
+		}
+	}
+
+	ctx := context.Background()
+
 	first := newWAL()
-	ctx, cancel := context.WithCancel(context.Background())
-	stopped := make(chan struct{})
-	go func() {
-		first.Run(ctx)
-		close(stopped)
-	}()
+	stopFirst := runWAL(first)
 
 	s1 := newTestStorage(t, WithWAL(first))
-	if err := s1.Set(context.Background(), "ключ", "значение"); err != nil {
+	if err := s1.Set(ctx, "ключ", "значение"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	if err := s1.Del(context.Background(), "лишний"); err != nil {
+	if err := s1.Del(ctx, "лишний"); err != nil {
 		t.Fatalf("Del: %v", err)
 	}
+	stopFirst()
 
-	cancel()
-	select {
-	case <-stopped:
-	case <-time.After(5 * time.Second):
-		t.Fatal("WAL не остановился")
-	}
+	second := newWAL()
+	stopSecond := runWAL(second)
 
-	s2 := newTestStorage(t, WithWAL(newWAL()))
-
-	got, err := s2.Get(context.Background(), "ключ")
+	s2 := newTestStorage(t, WithWAL(second))
+	got, err := s2.Get(ctx, "ключ")
 	if err != nil {
 		t.Fatalf("после восстановления Get: %v", err)
 	}
@@ -148,9 +159,25 @@ func TestRecoveryFromWAL(t *testing.T) {
 		t.Errorf("после восстановления Get = %q, ожидалось \"значение\"", got)
 	}
 
-	const recoveredMaxLSN = 2
-	if next := s2.idgen.Next(); next <= recoveredMaxLSN {
-		t.Errorf("LSN после восстановления = %d, ожидалось больше %d", next, recoveredMaxLSN)
+	if err := s2.Set(ctx, "новый", "после перезапуска"); err != nil {
+		t.Fatalf("Set после восстановления: %v", err)
+	}
+	stopSecond()
+
+	recs, err := wal.NewReader(filesystem.NewDirScanner(dir)).ReadAll()
+	if err != nil {
+		t.Fatalf("чтение журнала: %v", err)
+	}
+	if len(recs) != 3 {
+		t.Fatalf("записей в журнале: %d, ожидалось 3", len(recs))
+	}
+	for i, rec := range recs {
+		if want := int64(i + 1); rec.LSN != want {
+			t.Errorf("запись %d: LSN %d, ожидался %d", i, rec.LSN, want)
+		}
+	}
+	if last := recs[2]; last.Op != wal.OpSet || last.Args[0] != "новый" {
+		t.Errorf("последняя запись журнала: %+v", last)
 	}
 }
 

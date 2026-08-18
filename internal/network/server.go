@@ -63,15 +63,27 @@ func (s *TCPServer) Serve(ctx context.Context, handler Handler) {
 		}
 	}()
 
+	var retry time.Duration
+
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				break
 			}
-			s.logger.Error("accept", zap.Error(err))
+
+			retry = nextRetry(retry)
+			s.logger.Error("accept", zap.Error(err), zap.Duration("retry_in", retry))
+
+			t := time.NewTimer(retry)
+			select {
+			case <-t.C:
+			case <-ctx.Done():
+				t.Stop()
+			}
 			continue
 		}
+		retry = 0
 
 		if s.sem != nil && !s.sem.AcquireContext(ctx) {
 			_ = conn.Close()
@@ -89,6 +101,22 @@ func (s *TCPServer) Serve(ctx context.Context, handler Handler) {
 	}
 
 	conns.Wait()
+}
+
+func nextRetry(d time.Duration) time.Duration {
+	const (
+		first = 5 * time.Millisecond
+		limit = time.Second
+	)
+
+	switch {
+	case d == 0:
+		return first
+	case d >= limit:
+		return limit
+	default:
+		return 2 * d
+	}
 }
 
 func (s *TCPServer) handleConn(ctx context.Context, conn net.Conn, handler Handler) {

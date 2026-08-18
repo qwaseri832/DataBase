@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -36,12 +37,11 @@ type ReplicationConfig struct {
 }
 
 type ServerConfig struct {
-	Addr        string        `yaml:"addr"`
-	MaxClients  int           `yaml:"max_clients"`
-	ReadBuffer  string        `yaml:"read_buffer"`
-	IdleTimeout time.Duration `yaml:"idle_timeout"`
-
-	MaxMessageSize string `yaml:"max_message_size"`
+	Addr           string        `yaml:"addr"`
+	MaxClients     int           `yaml:"max_clients"`
+	ReadBuffer     string        `yaml:"read_buffer"`
+	MaxMessageSize string        `yaml:"max_message_size"`
+	IdleTimeout    time.Duration `yaml:"idle_timeout"`
 }
 
 type LoggingConfig struct {
@@ -65,12 +65,11 @@ func LoadFromFile(path string) (*Config, error) {
 
 func Load(r io.Reader) (*Config, error) {
 	dec := yaml.NewDecoder(r)
-
 	dec.KnownFields(true)
 
 	var cfg Config
 	if err := dec.Decode(&cfg); err != nil {
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return &Config{}, nil
 		}
 		return nil, fmt.Errorf("parse config: %w", err)

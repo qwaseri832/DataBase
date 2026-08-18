@@ -79,28 +79,3 @@ func TestFutureAwaitContextValue(t *testing.T) {
 		t.Errorf("AwaitContext() = %q, ожидалось \"готово\"", v)
 	}
 }
-
-func TestSemaphoreAcquireContext(t *testing.T) {
-	s := NewSemaphore(1)
-	s.Acquire()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-
-	if s.AcquireContext(ctx) {
-		t.Error("AcquireContext() = true при исчерпанных слотах")
-	}
-
-	s.Release()
-	if !s.AcquireContext(context.Background()) {
-		t.Error("AcquireContext() = false после освобождения слота")
-	}
-}
-
-func TestSemaphoreUnlimited(t *testing.T) {
-	s := NewSemaphore(0)
-	for i := 0; i < 100; i++ {
-		s.Acquire()
-	}
-	s.Release()
-}

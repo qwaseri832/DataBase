@@ -3,6 +3,7 @@ package wal
 import (
 	"bytes"
 	"encoding/gob"
+	"fmt"
 )
 
 type Op int
@@ -47,4 +48,19 @@ func (r *Record) Encode(buf *bytes.Buffer) error {
 
 func (r *Record) Decode(buf *bytes.Buffer) error {
 	return gob.NewDecoder(buf).Decode(r)
+}
+
+func DecodeSegment(data []byte) ([]Record, error) {
+	buf := bytes.NewBuffer(data)
+
+	var recs []Record
+	for buf.Len() > 0 {
+		var rec Record
+		if err := rec.Decode(buf); err != nil {
+			return nil, fmt.Errorf("decode record: %w", err)
+		}
+		recs = append(recs, rec)
+	}
+
+	return recs, nil
 }

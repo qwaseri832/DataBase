@@ -8,7 +8,7 @@ func TestParser_Parse(t *testing.T) {
 	tests := []struct {
 		name    string
 		input   string
-		wantCmd int
+		wantCmd Command
 		wantErr bool
 	}{
 		{"SET valid", "SET key value", CmdSet, false},
@@ -34,7 +34,7 @@ func TestLookupCommand(t *testing.T) {
 	tests := []struct {
 		name string
 		cmd  string
-		want int
+		want Command
 	}{
 		{"SET", "SET", CmdSet},
 		{"GET", "GET", CmdGet},

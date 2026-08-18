@@ -13,13 +13,6 @@ func NewSemaphore(n int) *Semaphore {
 	return &Semaphore{slots: make(chan struct{}, n)}
 }
 
-func (s *Semaphore) Acquire() {
-	if s.slots == nil {
-		return
-	}
-	s.slots <- struct{}{}
-}
-
 func (s *Semaphore) AcquireContext(ctx context.Context) bool {
 	if s.slots == nil {
 		return true

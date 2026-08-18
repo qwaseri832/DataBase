@@ -3,7 +3,6 @@ package replication_test
 import (
 	"bytes"
 	"context"
-	"encoding/gob"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,8 +34,10 @@ func TestSlaveReceivesSegmentLargerThanBuffer(t *testing.T) {
 	}
 
 	var payload bytes.Buffer
-	if err := gob.NewEncoder(&payload).Encode(want); err != nil {
-		t.Fatalf("подготовка сегмента: %v", err)
+	for i := range want {
+		if err := want[i].Encode(&payload); err != nil {
+			t.Fatalf("подготовка сегмента: %v", err)
+		}
 	}
 	if payload.Len() < 512<<10 {
 		t.Fatalf("сегмент получился слишком мал для проверки: %d байт", payload.Len())

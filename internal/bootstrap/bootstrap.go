@@ -30,6 +30,7 @@ const (
 	defaultSyncInterval = time.Second
 	defaultServerAddr   = ":4200"
 	defaultLogFile      = "spider.log"
+	engineInMemory      = "in_memory"
 )
 
 type App struct {
@@ -50,6 +51,11 @@ func New(cfg *config.Config) (*App, error) {
 	logger, err := buildLogger(cfg.Logging)
 	if err != nil {
 		return nil, fmt.Errorf("logger: %w", err)
+	}
+
+	eng, err := buildEngine(cfg.Engine, logger)
+	if err != nil {
+		return nil, fmt.Errorf("engine: %w", err)
 	}
 
 	w, err := buildWAL(cfg.WAL, logger)
@@ -78,7 +84,7 @@ func New(cfg *config.Config) (*App, error) {
 		sOpts = append(sOpts, storage.WithReplica(slave), storage.WithStream(slave.Stream()))
 	}
 
-	st, err := storage.New(buildEngine(cfg.Engine, logger), logger, sOpts...)
+	st, err := storage.New(eng, logger, sOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("storage: %w", err)
 	}
@@ -146,12 +152,21 @@ func buildLogger(cfg *config.LoggingConfig) (*zap.Logger, error) {
 	}.Build()
 }
 
-func buildEngine(cfg *config.EngineConfig, logger *zap.Logger) *engine.Engine {
+func buildEngine(cfg *config.EngineConfig, logger *zap.Logger) (*engine.Engine, error) {
+	if cfg == nil {
+		return engine.New(logger), nil
+	}
+
+	if cfg.Type != "" && cfg.Type != engineInMemory {
+		return nil, fmt.Errorf("unknown engine type %q, want %s", cfg.Type, engineInMemory)
+	}
+
 	var opts []engine.Option
-	if cfg != nil && cfg.Partitions > 0 {
+	if cfg.Partitions > 0 {
 		opts = append(opts, engine.WithPartitions(cfg.Partitions))
 	}
-	return engine.New(logger, opts...)
+
+	return engine.New(logger, opts...), nil
 }
 
 func buildWAL(cfg *config.WALConfig, logger *zap.Logger) (*wal.WAL, error) {

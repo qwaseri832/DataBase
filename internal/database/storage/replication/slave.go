@@ -1,9 +1,7 @@
 package replication
 
 import (
-	"bytes"
 	"context"
-	"encoding/gob"
 	"path/filepath"
 	"time"
 
@@ -91,8 +89,8 @@ func (s *Slave) sync(ctx context.Context) {
 		return
 	}
 
-	var recs []wal.Record
-	if err := gob.NewDecoder(bytes.NewReader(resp.SegmentData)).Decode(&recs); err != nil {
+	recs, err := wal.DecodeSegment(resp.SegmentData)
+	if err != nil {
 		s.logger.Error("decode segment", zap.String("segment", resp.SegmentName), zap.Error(err))
 		return
 	}

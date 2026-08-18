@@ -20,9 +20,9 @@ func NewWriter(f Flusher, l *zap.Logger) *Writer {
 	return &Writer{flusher: f, logger: l}
 }
 
-func (w *Writer) Write(batch []Pending) {
+func (w *Writer) Write(batch []Pending) error {
 	if len(batch) == 0 {
-		return
+		return nil
 	}
 
 	var buf bytes.Buffer
@@ -30,16 +30,16 @@ func (w *Writer) Write(batch []Pending) {
 		rec := batch[i].Record()
 		if err := rec.Encode(&buf); err != nil {
 			w.logger.Warn("encode WAL record", zap.Error(err))
-			ack(batch, err)
-			return
+			return err
 		}
 	}
 
-	err := w.flusher.Write(buf.Bytes())
-	if err != nil {
+	if err := w.flusher.Write(buf.Bytes()); err != nil {
 		w.logger.Warn("write WAL batch", zap.Error(err))
+		return err
 	}
-	ack(batch, err)
+
+	return nil
 }
 
 func (w *Writer) Close() {
@@ -49,11 +49,5 @@ func (w *Writer) Close() {
 	}
 	if err := c.Close(); err != nil {
 		w.logger.Warn("close WAL segment", zap.Error(err))
-	}
-}
-
-func ack(batch []Pending, err error) {
-	for i := range batch {
-		batch[i].Done(err)
 	}
 }

@@ -11,18 +11,21 @@ import (
 
 var ErrClosed = errors.New("wal: closed")
 
+type Applier func(recs []Record)
+
 type WAL struct {
 	writer   *Writer
 	reader   *Reader
 	timeout  time.Duration
 	maxBatch int
 
-	mu    sync.Mutex
-	batch []Pending
+	mu     sync.Mutex
+	batch  []Pending
+	lsn    int64
+	apply  Applier
+	closed bool
 
-	batches chan []Pending
-	done    chan struct{}
-	closing sync.Once
+	full chan struct{}
 }
 
 func New(w *Writer, r *Reader, timeout time.Duration, maxBatch int) *WAL {
@@ -37,9 +40,29 @@ func New(w *Writer, r *Reader, timeout time.Duration, maxBatch int) *WAL {
 		reader:   r,
 		timeout:  timeout,
 		maxBatch: maxBatch,
-		batches:  make(chan []Pending),
-		done:     make(chan struct{}),
+		full:     make(chan struct{}, 1),
 	}
+}
+
+func (w *WAL) OnFlush(apply Applier) {
+	syncx.Guard(&w.mu, func() { w.apply = apply })
+}
+
+func (w *WAL) Recover() ([]Record, error) {
+	recs, err := w.reader.ReadAll()
+	if err != nil {
+		return nil, err
+	}
+
+	var last int64
+	for _, r := range recs {
+		if r.LSN > last {
+			last = r.LSN
+		}
+	}
+
+	syncx.Guard(&w.mu, func() { w.lsn = last })
+	return recs, nil
 }
 
 func (w *WAL) Run(ctx context.Context) {
@@ -49,12 +72,10 @@ func (w *WAL) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			w.close()
-			w.drain()
-			w.writer.Close()
+			w.shutdown()
 			return
-		case b := <-w.batches:
-			w.writer.Write(b)
+		case <-w.full:
+			w.flush()
 			ticker.Reset(w.timeout)
 		case <-ticker.C:
 			w.flush()
@@ -62,58 +83,100 @@ func (w *WAL) Run(ctx context.Context) {
 	}
 }
 
-func (w *WAL) Recover() ([]Record, error) {
-	return w.reader.ReadAll()
-}
+func (w *WAL) Append(op Op, args []string) syncx.Future[error] {
+	var (
+		p      Pending
+		closed bool
+		full   bool
+	)
 
-func (w *WAL) Append(lsn int64, op Op, args []string) syncx.Future[error] {
-	p := newPending(lsn, op, args)
-
-	var full []Pending
 	syncx.Guard(&w.mu, func() {
-		w.batch = append(w.batch, p)
-		if len(w.batch) >= w.maxBatch {
-			full, w.batch = w.batch, nil
+		if w.closed {
+			closed = true
+			return
 		}
+
+		w.lsn++
+		p = newPending(w.lsn, op, args)
+		w.batch = append(w.batch, p)
+		full = len(w.batch) >= w.maxBatch
 	})
 
-	if full != nil {
-		w.submit(full)
+	if closed {
+		p = newPending(0, op, args)
+		p.Done(ErrClosed)
+		return p.Future()
+	}
+
+	if full {
+		w.wake()
 	}
 
 	return p.Future()
 }
 
-func (w *WAL) submit(b []Pending) {
-	select {
-	case w.batches <- b:
-	case <-w.done:
-		ack(b, ErrClosed)
-	}
-}
-
 func (w *WAL) flush() {
-	var b []Pending
+	var (
+		batch []Pending
+		apply Applier
+		rest  bool
+	)
+
 	syncx.Guard(&w.mu, func() {
-		b, w.batch = w.batch, nil
+		n := min(len(w.batch), w.maxBatch)
+		batch, w.batch = w.batch[:n], w.batch[n:]
+		apply, rest = w.apply, len(w.batch) > 0
 	})
-	if len(b) > 0 {
-		w.writer.Write(b)
+
+	w.write(batch, apply)
+
+	if rest {
+		w.wake()
 	}
 }
 
-func (w *WAL) drain() {
-	for {
-		select {
-		case b := <-w.batches:
-			w.writer.Write(b)
-		default:
-			w.flush()
-			return
-		}
+func (w *WAL) shutdown() {
+	var (
+		batch []Pending
+		apply Applier
+	)
+
+	syncx.Guard(&w.mu, func() {
+		w.closed = true
+		batch, w.batch = w.batch, nil
+		apply = w.apply
+	})
+
+	w.write(batch, apply)
+	w.writer.Close()
+}
+
+func (w *WAL) write(batch []Pending, apply Applier) {
+	if len(batch) == 0 {
+		return
+	}
+
+	err := w.writer.Write(batch)
+	if err == nil && apply != nil {
+		apply(records(batch))
+	}
+
+	for i := range batch {
+		batch[i].Done(err)
 	}
 }
 
-func (w *WAL) close() {
-	w.closing.Do(func() { close(w.done) })
+func (w *WAL) wake() {
+	select {
+	case w.full <- struct{}{}:
+	default:
+	}
+}
+
+func records(batch []Pending) []Record {
+	recs := make([]Record, len(batch))
+	for i := range batch {
+		recs[i] = batch[i].Record()
+	}
+	return recs
 }

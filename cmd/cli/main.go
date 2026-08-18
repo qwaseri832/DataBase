@@ -59,7 +59,7 @@ func run(addr string, timeout time.Duration, bufStr string, stdin io.Reader, std
 		resp, err := client.Send([]byte(line))
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				return fmt.Errorf("connection closed by server")
+				return errors.New("connection closed by server")
 			}
 			return err
 		}
